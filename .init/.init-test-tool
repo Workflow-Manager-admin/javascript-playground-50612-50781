@@ -1,0 +1,4 @@
+{
+    "command": "npm run test",
+    "working_directory": "/home/kavia/workspace/code-generation/javascript-playground-50612-50781/javascript_playground_frontend"
+}
