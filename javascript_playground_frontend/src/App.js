@@ -50,48 +50,86 @@ function App() {
     // --- Secure JS sandbox using postMessage ---
     setOutput('Running...');
 
-    // Remove any previous listeners for output (avoid double print)
-    window.removeEventListener('__js_playground_output__', ()=>{});
-    window.removeEventListener('message', window.__js_playgroundMsgHandler);
+    // Properly remove only previously attached message handler
+    if (window.__js_playgroundMsgHandler) {
+      window.removeEventListener('message', window.__js_playgroundMsgHandler);
+    }
 
-    // Setup handler to receive messages from the iframe
+    // Timeout cleanup ref
+    if (window.__jsPlaygroundTimeoutHandle) {
+      clearTimeout(window.__jsPlaygroundTimeoutHandle);
+      window.__jsPlaygroundTimeoutHandle = null;
+    }
+
+    // Any leftover iframe, clean up just in case
+    if (window.__currentJSTempIframe) {
+      try {
+        document.body.removeChild(window.__currentJSTempIframe);
+      } catch (_) {}
+      window.__currentJSTempIframe = null;
+    }
+
+    // Setup new handler to receive messages from the iframe
     window.__js_playgroundMsgHandler = function(event) {
       // Accept only messages from our own iframe (type "iframe-js-output")
       if (typeof event.data === 'object' && event.data && event.data.type === 'iframe-js-output') {
-        setOutput(event.data.payload || '[No output.]');
-        // Clean up iframe after receiving output
+        // Sanitize for display (prevent accidental HTML rendering)
+        const safePayload =
+          typeof event.data.payload === 'string'
+            ? event.data.payload.replace(/[<>&]/g, (c) =>
+                c === '<' ? '&lt;' : c === '>' ? '&gt;' : '&amp;'
+              )
+            : '[No output.]';
+        setOutput(safePayload || '[No output.]');
+
+        // Cleanup
         if (window.__currentJSTempIframe) {
           document.body.removeChild(window.__currentJSTempIframe);
           window.__currentJSTempIframe = null;
         }
+        if (window.__jsPlaygroundTimeoutHandle) {
+          clearTimeout(window.__jsPlaygroundTimeoutHandle);
+          window.__jsPlaygroundTimeoutHandle = null;
+        }
+        window.removeEventListener('message', window.__js_playgroundMsgHandler);
       }
     };
     window.addEventListener('message', window.__js_playgroundMsgHandler);
 
-    // Prepare the code+messaging logic: inject code and post logs/errors
+    // Enhanced infinite loop/time quota protection code injection
+    // This minimal "CPU meter" interrupts user code if >X ms
     const userJS = code;
+    const loopTrap =
+      `\nvar __playground_start=Date.now();function __playgroundCheck(){if(Date.now()-__playground_start>1100)throw new Error('Execution timed out: Infinite loop or slow code?');}`; // 1.1s per run 
+    // Also attempt to rewrite some "for" and "while" for (not bulletproof)
+    const protectedUserJS = userJS
+      .replace(/for\s*\(([^)]*)\)\s*{/g, 'for($1){__playgroundCheck();')
+      .replace(/while\s*\(([^)]*)\)\s*{/g, 'while($1){__playgroundCheck();')
+      .replace(/do\s*{/g, 'do{__playgroundCheck();');
+
     const sandboxScript = `
 (function(){
   var output = [];
   function printLog() {
     var args = Array.prototype.slice.call(arguments);
     output.push(args.map(function(a) {
-      try {return typeof a === 'object' ? JSON.stringify(a, null, 2) : String(a);}
+      try {return typeof a==='object'&&a?JSON.stringify(a,null,2):String(a);}
       catch (e) {return '[object]';}
     }).join(' '));
   }
-  // Proxy console methods
-  console.log = printLog;
-  console.error = printLog;
-
+  // Proxy console.* methods
+  console.log=printLog;console.error=printLog;console.warn=printLog;console.info=printLog;
+  var __playground_start = Date.now();
+  function __playgroundCheck(){if(Date.now()-__playground_start > 1100)throw new Error('Execution timed out: Infinite loop or slow code?');}
   try {
     (function(){
-      ${userJS}
+      ${protectedUserJS}
     })();
   } catch(e) {
-    output.push('Error: ' + e);
+    output.push('Error: ' + e.message);
   }
-  parent.postMessage({type: 'iframe-js-output', payload: output.join('\\n')}, '*');
+  // Output must never be HTML, always as text
+  parent.postMessage({type:'iframe-js-output',payload:output.join('\\n')}, '*');
 })();`;
 
     // Create blob URL for script
@@ -101,7 +139,7 @@ function App() {
     // Create sandboxed iframe
     const iframe = document.createElement('iframe');
     iframe.style.display = 'none';
-    // Only allow scripts. No same-origin: no cross-origin access is possible.
+    // Allow only scripts, no top nav, no popups, no origin
     iframe.sandbox = 'allow-scripts';
     window.__currentJSTempIframe = iframe; // Save for later cleanup
 
@@ -112,18 +150,22 @@ function App() {
       iframe.contentDocument.body.appendChild(script);
     };
 
-    // We need some html for the iframe to boot in about:blank and load script
+    // Setup blank HTML for iframe content, script will be injected on load
     iframe.srcdoc = '<html><body></body></html>';
     document.body.appendChild(iframe);
 
-    // Fallback: if postMessage never fires (e.g., script crash), cleanup after 5sec.
-    setTimeout(() => {
+    // Fallback: if postMessage never fires (e.g., forbidden op, blocked, infinite loop), cleanup after 2.4sec
+    window.__jsPlaygroundTimeoutHandle = setTimeout(() => {
       if (window.__currentJSTempIframe) {
-        document.body.removeChild(window.__currentJSTempIframe);
+        try {
+          document.body.removeChild(window.__currentJSTempIframe);
+        } catch (_) {}
         window.__currentJSTempIframe = null;
-        setOutput('[Timed out or script blocked.]');
       }
-    }, 5000);
+      setOutput('[Execution timed out or script was blocked.]\n(Hint: Avoid infinite loops. Try using console.log for debugging.)');
+      window.removeEventListener('message', window.__js_playgroundMsgHandler);
+      window.__jsPlaygroundTimeoutHandle = null;
+    }, 2400); // 2.4s gives a sense of "fast feedback"
   }
 
   // PUBLIC_INTERFACE
