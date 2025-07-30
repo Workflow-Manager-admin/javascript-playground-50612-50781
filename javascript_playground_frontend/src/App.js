@@ -47,36 +47,83 @@ function App() {
 
   // PUBLIC_INTERFACE
   function runCode() {
-    // Run JS in sandboxed iframe for safety
+    // --- Secure JS sandbox using postMessage ---
     setOutput('Running...');
+
+    // Remove any previous listeners for output (avoid double print)
+    window.removeEventListener('__js_playground_output__', ()=>{});
+    window.removeEventListener('message', window.__js_playgroundMsgHandler);
+
+    // Setup handler to receive messages from the iframe
+    window.__js_playgroundMsgHandler = function(event) {
+      // Accept only messages from our own iframe (type "iframe-js-output")
+      if (typeof event.data === 'object' && event.data && event.data.type === 'iframe-js-output') {
+        setOutput(event.data.payload || '[No output.]');
+        // Clean up iframe after receiving output
+        if (window.__currentJSTempIframe) {
+          document.body.removeChild(window.__currentJSTempIframe);
+          window.__currentJSTempIframe = null;
+        }
+      }
+    };
+    window.addEventListener('message', window.__js_playgroundMsgHandler);
+
+    // Prepare the code+messaging logic: inject code and post logs/errors
+    const userJS = code;
+    const sandboxScript = `
+(function(){
+  var output = [];
+  function printLog() {
+    var args = Array.prototype.slice.call(arguments);
+    output.push(args.map(function(a) {
+      try {return typeof a === 'object' ? JSON.stringify(a, null, 2) : String(a);}
+      catch (e) {return '[object]';}
+    }).join(' '));
+  }
+  // Proxy console methods
+  console.log = printLog;
+  console.error = printLog;
+
+  try {
+    (function(){
+      ${userJS}
+    })();
+  } catch(e) {
+    output.push('Error: ' + e);
+  }
+  parent.postMessage({type: 'iframe-js-output', payload: output.join('\\n')}, '*');
+})();`;
+
+    // Create blob URL for script
+    const blob = new Blob([sandboxScript], {type: 'text/javascript'});
+    const blobUrl = URL.createObjectURL(blob);
+
+    // Create sandboxed iframe
     const iframe = document.createElement('iframe');
     iframe.style.display = 'none';
-    iframe.sandbox =
-      'allow-scripts'; // No allow-same-origin to prevent abuse
+    // Only allow scripts. No same-origin: no cross-origin access is possible.
+    iframe.sandbox = 'allow-scripts';
+    window.__currentJSTempIframe = iframe; // Save for later cleanup
+
+    // When the iframe loads, inject a script tag with our blob URL
+    iframe.onload = () => {
+      const script = iframe.contentDocument.createElement('script');
+      script.src = blobUrl;
+      iframe.contentDocument.body.appendChild(script);
+    };
+
+    // We need some html for the iframe to boot in about:blank and load script
+    iframe.srcdoc = '<html><body></body></html>';
     document.body.appendChild(iframe);
 
-    let capturedLogs = [];
-
-    function captureLog(...args) {
-      const msg = args.map(a =>
-        typeof a === 'object' ? JSON.stringify(a, null, 2) : String(a)
-      ).join(' ');
-      capturedLogs.push(msg);
-    }
-
-    try {
-      const win = iframe.contentWindow;
-      win.console.log = captureLog;
-      win.console.error = captureLog;
-      // eslint-disable-next-line no-new-func
-      win.eval(code);
-      setOutput(capturedLogs.join('\n') || '[No output.]');
-    } catch (err) {
-      setOutput('Error: ' + err);
-    }
+    // Fallback: if postMessage never fires (e.g., script crash), cleanup after 5sec.
     setTimeout(() => {
-      document.body.removeChild(iframe);
-    }, 33);
+      if (window.__currentJSTempIframe) {
+        document.body.removeChild(window.__currentJSTempIframe);
+        window.__currentJSTempIframe = null;
+        setOutput('[Timed out or script blocked.]');
+      }
+    }, 5000);
   }
 
   // PUBLIC_INTERFACE
